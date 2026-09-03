@@ -1,0 +1,6 @@
+{
+  "name": "MathGPT",
+  "description": "A professional AI-powered Math GPT for Algebra, Calculus, and Formulas with step-by-step problem solving, photo math OCR, and concept explanations.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
