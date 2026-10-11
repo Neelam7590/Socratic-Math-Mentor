@@ -1003,7 +1003,7 @@ export function MathGPTInterface({ settings, onUpdateSettings }: MathGPTInterfac
                     onChange={(e) => setStepInput(e.target.value)}
                     onKeyDown={handleStepKeyDown}
                     placeholder={`Your answer for Step ${activeSession.currentStep.stepNumber}...`}
-                    className="flex-1 px-4 py-2.5 rounded-xl bg-white dark:bg-stone-950 border border-stone-300 dark:border-stone-700 text-stone-900 dark:text-stone-100 text-sm focus:outline-none focus:border-emerald-500 shadow-2xs font-mono"
+                    className="flex-1 px-4 py-2.5 rounded-xl bg-white dark:bg-stone-950 border border-stone-300 dark:border-stone-700 text-stone-900 dark:text-stone-100 text-sm focus:outline-none focus:border-stone-500 dark:focus:border-stone-400 shadow-2xs font-mono"
                   />
                   <button
                     type="button"

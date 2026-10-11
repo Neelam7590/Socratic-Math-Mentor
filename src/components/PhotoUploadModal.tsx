@@ -286,7 +286,7 @@ export function PhotoUploadModal({
               className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white text-xs font-semibold rounded-xl flex items-center gap-2 transition-all cursor-pointer shadow-sm"
               id="confirm-photo-problem-btn"
             >
-              <span>Solve with MathGPT</span>
+              <span>Solve & Explain</span>
               <ArrowRight className="w-4 h-4" />
             </button>
           </div>

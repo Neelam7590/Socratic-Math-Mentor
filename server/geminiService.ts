@@ -24,7 +24,7 @@ function getGenAI(): GoogleGenAI {
 }
 
 // Resilient model list prioritized by low-latency availability and active status
-const CANDIDATE_MODELS = ['gemini-3.1-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest'];
+const CANDIDATE_MODELS = ['gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-3.8-flash'];
 
 type GenerateContentParamsWithoutModel = Omit<
   Parameters<typeof GoogleGenAI.prototype.models.generateContent>[0],
@@ -41,17 +41,24 @@ function cleanJsonString(rawText?: string): string {
 
 async function generateContentWithRetry(
   params: GenerateContentParamsWithoutModel,
-  maxAttemptsPerModel: number = 2,
-  timeoutMs: number = 35000
+  maxAttemptsPerModel: number = 1,
+  timeoutMs: number = 14000
 ) {
   const ai = getGenAI();
   let lastError: any = null;
 
   for (const model of CANDIDATE_MODELS) {
+    const is31OrLite = model.includes('3.1') || model.includes('lite');
+    const modelConfig: any = { ...params.config };
+    if (is31OrLite && !modelConfig.thinkingConfig) {
+      modelConfig.thinkingConfig = { thinkingLevel: ThinkingLevel.MINIMAL };
+    }
+
     for (let attempt = 1; attempt <= maxAttemptsPerModel; attempt++) {
       try {
         const callPromise = ai.models.generateContent({
           ...params,
+          config: modelConfig,
           model,
         });
 
@@ -65,8 +72,16 @@ async function generateContentWithRetry(
         lastError = err;
         const errMsg = err?.message || String(err);
         console.warn(`[Gemini API] Model ${model} attempt ${attempt} failed: ${errMsg}`);
-        // If 503 unavailable or 404 not found, immediately fall through to next candidate model
-        if (errMsg.includes('503') || errMsg.includes('404') || errMsg.includes('UNAVAILABLE') || errMsg.includes('high demand')) {
+        // If 503 unavailable, 404, high demand, Timeout, or Quota exceeded, immediately break to try next model
+        if (
+          errMsg.includes('503') ||
+          errMsg.includes('404') ||
+          errMsg.includes('UNAVAILABLE') ||
+          errMsg.includes('high demand') ||
+          errMsg.includes('Timeout') ||
+          errMsg.includes('Quota') ||
+          errMsg.includes('429')
+        ) {
           break;
         }
         if (attempt < maxAttemptsPerModel) {
@@ -81,52 +96,60 @@ async function generateContentWithRetry(
 
 export async function analyzeProblemImage(base64Data: string, mimeType: string) {
   const prompt = `You are an expert mathematical OCR and analysis engine for an academic AI Math Tutor.
-Analyze this uploaded photo of a mathematical problem.
-Subject scope is strictly Algebra or Calculus (Equations, Quadratic equations, Factorization, Functions, Limits, Derivatives, Integrals, Applications of derivatives).
+Analyze this uploaded photo of a mathematical problem or formula.
+Subject scope is Algebra, Calculus, or general mathematics (Equations, Quadratic equations, Factorization, Functions, Limits, Derivatives, Integrals, Formulas).
 
 Tasks:
-1. Determine if the mathematical problem is clearly readable and valid.
+1. Determine if the mathematical problem/formula is clearly readable and valid.
 2. If unreadable, blurry, cutoff, or not a math problem, set isReadable: false and explain why politely.
-3. If readable, convert the math into clean standard LaTeX notation (e.g. 2x^2 + 5x - 3 = 0, or \\int x^2 \\sin(x)\\,dx).
+3. If readable, convert the math into clean standard LaTeX notation (e.g. \\frac{df}{dt} = \\lim_{h \\to 0} \\frac{f(t+h) - f(t)}{h}, or 2x^2 + 5x - 3 = 0).
 4. Provide a clean human-friendly plain text equivalent.
 5. Classify the subject (algebra or calculus), the specific topic, and estimated difficulty.
-6. Provide an estimated number of Socratic steps to solve it (typically 3 to 6).`;
+6. Provide an estimated number of Socratic steps to solve or explain it (typically 3 to 6).`;
 
-  const response = await generateContentWithRetry({
-    contents: [
-      {
-        parts: [
-          {
-            inlineData: {
-              data: base64Data,
-              mimeType: mimeType || 'image/jpeg',
+  try {
+    const response = await generateContentWithRetry({
+      contents: [
+        {
+          parts: [
+            {
+              inlineData: {
+                data: base64Data,
+                mimeType: mimeType || 'image/jpeg',
+              },
             },
-          },
-          { text: prompt },
-        ],
-      },
-    ],
-    config: {
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          isReadable: { type: Type.BOOLEAN },
-          unreadableReason: { type: Type.STRING },
-          latex: { type: Type.STRING },
-          plainText: { type: Type.STRING },
-          subject: { type: Type.STRING, enum: ['algebra', 'calculus'] },
-          topic: { type: Type.STRING },
-          difficulty: { type: Type.STRING, enum: ['introductory', 'intermediate', 'advanced'] },
-          suggestedStepsCount: { type: Type.INTEGER },
+            { text: prompt },
+          ],
         },
-        required: ['isReadable'],
+      ],
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            isReadable: { type: Type.BOOLEAN },
+            unreadableReason: { type: Type.STRING },
+            latex: { type: Type.STRING },
+            plainText: { type: Type.STRING },
+            subject: { type: Type.STRING, enum: ['algebra', 'calculus'] },
+            topic: { type: Type.STRING },
+            difficulty: { type: Type.STRING, enum: ['introductory', 'intermediate', 'advanced'] },
+            suggestedStepsCount: { type: Type.INTEGER },
+          },
+          required: ['isReadable'],
+        },
       },
-    },
-  });
+    }, 1, 14000);
 
-  const text = cleanJsonString(response.text);
-  return JSON.parse(text);
+    const text = cleanJsonString(response.text);
+    return JSON.parse(text);
+  } catch (err: any) {
+    console.warn('[Gemini API] analyzeProblemImage failed:', err);
+    return {
+      isReadable: false,
+      unreadableReason: 'फोटो प्रोसेस करने में समय लगा या नेटवर्क धीमा है। कृपया फोटो को दोबारा खींचें या समीकरण को सीधे चैट में लिख दें।',
+    };
+  }
 }
 
 export async function parseProblemText(rawInput: string) {
