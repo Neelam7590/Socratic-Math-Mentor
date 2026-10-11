@@ -3,7 +3,7 @@ import { MathGPTInterface } from './components/MathGPTInterface.js';
 import type { UserSettings } from './types.js';
 
 const INITIAL_SETTINGS: UserSettings = {
-  learningLevel: 'intro_college',
+  learningLevel: 'high_school',
   theme: 'light',
   language: 'en',
   soundEnabled: true,

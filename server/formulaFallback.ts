@@ -276,26 +276,6 @@ export function findFallbackFormula(query: string): FormulaExplanation {
     }
   }
 
-  // Default fallback for any query if upstream service is experiencing a 503 burst
-  return {
-    name: query.length > 30 ? 'Mathematical Formula & Method' : query,
-    formulaLatex: 'f(x) \\implies \\text{Step-by-Step Mathematical Method}',
-    category: clean.includes('int') || clean.includes('integral') ? 'integrals' : 'algebra',
-    intuitiveExplanation: `This concept addresses "${query}". Mathematical methods in Algebra and Calculus break complex operations into standard transformation steps so they can be simplified systematically.`,
-    whenToUse: `Apply when encountering algebraic expressions or calculus operations matching "${query}".`,
-    keyStepsOrRules: [
-      'Identify the structure of the equation or expression.',
-      'Apply the corresponding standard algebraic or calculus operation.',
-      'Simplify terms systematically step-by-step.',
-      'Check boundary conditions and verify your final result.'
-    ],
-    commonMistakes: 'Skipping intermediate simplification steps or making algebraic sign errors.',
-    example: {
-      problemLatex: 'x^2 + 3 = 0',
-      rawInput: 'x^2 + 3 = 0',
-      subject: 'algebra',
-      topic: 'Solving Equations',
-      quickWalkthrough: 'Subtract 3 from both sides: x² = -3. Take the square root: x = ±√(-3) = ±i√3.'
-    }
-  };
+  // Return null if no matching formula in dictionary
+  return null;
 }

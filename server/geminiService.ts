@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 import type { MathProblem, SocraticStep, TutorMessage } from '../src/types.js';
 import { findFallbackFormula } from './formulaFallback.js';
 import { trySolveLocally } from './localMathEngine.js';
@@ -23,8 +23,8 @@ function getGenAI(): GoogleGenAI {
   return aiClient;
 }
 
-// Resilient model list prioritized by low-latency availability
-const CANDIDATE_MODELS = ['gemini-3.1-flash-lite', 'gemini-3.7-flash', 'gemini-flash-latest'];
+// Resilient model list prioritized by low-latency availability and active status
+const CANDIDATE_MODELS = ['gemini-3.1-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest'];
 
 type GenerateContentParamsWithoutModel = Omit<
   Parameters<typeof GoogleGenAI.prototype.models.generateContent>[0],
@@ -41,7 +41,8 @@ function cleanJsonString(rawText?: string): string {
 
 async function generateContentWithRetry(
   params: GenerateContentParamsWithoutModel,
-  maxAttemptsPerModel: number = 1
+  maxAttemptsPerModel: number = 2,
+  timeoutMs: number = 35000
 ) {
   const ai = getGenAI();
   let lastError: any = null;
@@ -49,14 +50,13 @@ async function generateContentWithRetry(
   for (const model of CANDIDATE_MODELS) {
     for (let attempt = 1; attempt <= maxAttemptsPerModel; attempt++) {
       try {
-        // Wrap call with 8s timeout to prevent hanging on 503 high-demand models
         const callPromise = ai.models.generateContent({
           ...params,
           model,
         });
 
         const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error(`Timeout on model ${model}`)), 8000)
+          setTimeout(() => reject(new Error(`Timeout on model ${model} after ${timeoutMs}ms`)), timeoutMs)
         );
 
         const response = (await Promise.race([callPromise, timeoutPromise])) as any;
@@ -65,8 +65,13 @@ async function generateContentWithRetry(
         lastError = err;
         const errMsg = err?.message || String(err);
         console.warn(`[Gemini API] Model ${model} attempt ${attempt} failed: ${errMsg}`);
-        // Immediately try next model in candidate list
-        break;
+        // If 503 unavailable or 404 not found, immediately fall through to next candidate model
+        if (errMsg.includes('503') || errMsg.includes('404') || errMsg.includes('UNAVAILABLE') || errMsg.includes('high demand')) {
+          break;
+        }
+        if (attempt < maxAttemptsPerModel) {
+          await new Promise((res) => setTimeout(res, 500));
+        }
       }
     }
   }
@@ -377,28 +382,48 @@ Action: ${action.toUpperCase()}`;
   return JSON.parse(text);
 }
 
+const buildSimpleSystemInstruction = (learningLevel: string = 'high_school') => `You are an expert mathematical AI assistant (just like Google Search and Google Gemini).
+Your purpose is to explain mathematics, science, equations, and formulas with supreme clarity, structural elegance, and clean LaTeX, matching Google's exact style.
+
+Formatting & Style Rules:
+1. NO BOT INTRODUCTIONS:
+   - Never say "नमस्ते! मैं MathGPT हूँ", "I am your personal tutor", or conversational greeting filler. Start IMMEDIATELY with the answer and explanation.
+
+2. FOR GENERAL MATHEMATICAL FORMULAS, DEFINITIONS, OR IDENTITIES:
+   - Identify what the expression represents clearly:
+     "The expression shows the [name of concept/formula], which is used in [field] to [purpose]."
+   - State: "Since this is a general mathematical formula rather than a specific problem, here is an explanation of what each part represents and how to apply it:"
+   - Provide a "### Formula Breakdown" section:
+     - Show the complete formula in display LaTeX ($$...$$).
+     - Use clean bullet points (•) breaking down each symbol and component:
+       • Symbol: Exact mathematical representation (clear intuitive meaning in parentheses).
+   - Provide an "### Example: How to Use It" section:
+     - Show a concrete, clean worked example (e.g., using a simple function like $f(t) = t^2$ or a concrete equation).
+     - Give numbered algebraic steps (1. Substitute..., 2. Expand..., 3. Simplify..., 4. Factor..., 5. Evaluate...).
+     - State the clean final result clearly.
+
+3. FOR SPECIFIC EQUATIONS OR PROBLEMS TO SOLVE (e.g. 2x^2 + 5x - 3 = 0, \\int x sin(x) dx, 3x + 6 = 18):
+   - State the problem and final answer directly at the start.
+   - Provide clear, numbered step-by-step solution steps showing each transformation.
+   - Highlight the final answer clearly in bold LaTeX ($$\\mathbf{...}$$).
+
+4. FOR CONCEPT QUESTIONS (e.g. "Calculus kya hota hai", "What is linear algebra"):
+   - Give the core definition and intuitive meaning directly.
+   - Break down the main parts or branches cleanly.
+   - Provide a realistic real-world application.
+
+5. LANGUAGE & TONE:
+   - Match the user's language naturally.
+   - If the user asks in Hindi or Hinglish, explain in clean, clear Hindi/Hinglish using standard English math terms and formulas.
+   - If the user asks in English or provides a mathematical formula/photo with no text, provide the answer in crisp, clear English (just like Google).
+   - All equations must use proper KaTeX ($...$ for inline, $$...$$ for block display).`;
+
 export async function solveMathDirectly(
   query: string,
   history: Array<{ role: 'user' | 'assistant'; content: string }> = [],
-  learningLevel: string = 'intro_college'
+  learningLevel: string = 'high_school'
 ) {
-  const prompt = `You are MathGPT, a world-class AI mathematical problem solver and tutor.
-The user asked: "${query}"
-Academic level: ${learningLevel}.
-
-Answer instructions:
-1. Provide a comprehensive, accurate, step-by-step mathematical solution.
-2. If this is a problem/equation/integral/derivative to solve:
-   - State the problem clearly in LaTeX format.
-   - Show the final solution clearly and prominently.
-   - Break down the solution step-by-step with clear reasoning and LaTeX equations ($...$ for inline, $$...$$ for display equations).
-   - State the formulas/theorems used.
-   - Mention key tips or alternate shortcuts if relevant.
-3. If this is a question about a formula, theorem, concept, or doubt (e.g., "explain chain rule", "what is integration by parts", or a question in Hindi/Hinglish/English):
-   - Explain the concept intuitively and clearly in friendly language (respecting any language preference in the query, e.g. Hindi/Hinglish if asked).
-   - Write out the core formulas in beautiful LaTeX.
-   - Give an example showing how to apply it.
-4. Keep the formatting clean, professional, and well-structured using markdown headings and bullet points.`;
+  const systemInstruction = buildSimpleSystemInstruction(learningLevel);
 
   const contents: any[] = [];
   // Add recent chat context
@@ -413,12 +438,16 @@ Answer instructions:
 
   contents.push({
     role: 'user',
-    parts: [{ text: prompt }],
+    parts: [{ text: query }],
   });
 
   try {
     const response = await generateContentWithRetry({
       contents,
+      config: {
+        systemInstruction,
+        thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+      },
     });
 
     const reply = response.text || 'No response generated.';
@@ -437,15 +466,81 @@ Answer instructions:
       };
     }
 
-    // Offline formula database fallback
-    const fallback = findFallbackFormula(query);
-    if (fallback) {
-      return {
-        content: `### **${fallback.name}**\n\n$$\n${fallback.formulaLatex}\n$$\n\n${fallback.intuitiveExplanation}\n\n#### **When to Apply**\n${fallback.whenToUse}\n\n#### **Common Traps to Avoid**\n${fallback.commonMistakes}\n\n#### **Key Steps**\n${fallback.keyStepsOrRules.map((s) => `- ${s}`).join('\n')}\n\n#### **Example**\n$$\n${fallback.example.problemLatex}\n$$\n*Walkthrough:* ${fallback.example.quickWalkthrough}`,
-        success: true,
-      };
+    // Graceful helpful response if all models are temporarily unavailable
+    return {
+      content: `नमस्ते! AI सर्वर से जुड़ने में थोड़ी देरी हुई है। कृपया कुछ ही सेकंड में अपना प्रश्न दोबारा पूछें।\n\n*(Connection delay. Please try sending your question again in a moment.)*`,
+      success: true,
+    };
+  }
+}
+
+export async function solveMathStream(
+  query: string,
+  history: Array<{ role: 'user' | 'assistant'; content: string }> = [],
+  learningLevel: string = 'high_school',
+  onChunk: (chunk: string) => void
+) {
+  const systemInstruction = buildSimpleSystemInstruction(learningLevel);
+
+  const contents: any[] = [];
+  if (history && history.length > 0) {
+    for (const h of history.slice(-6)) {
+      contents.push({
+        role: h.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: h.content }],
+      });
     }
-    throw err;
+  }
+
+  contents.push({
+    role: 'user',
+    parts: [{ text: query }],
+  });
+
+  const ai = getGenAI();
+  let receivedAny = false;
+
+  for (const model of CANDIDATE_MODELS) {
+    const isLite = model === 'gemini-3.1-flash-lite';
+    const config: any = {
+      systemInstruction,
+    };
+    if (isLite) {
+      config.thinkingConfig = { thinkingLevel: ThinkingLevel.MINIMAL };
+    }
+
+    const attempts = isLite ? 2 : 1;
+    for (let att = 1; att <= attempts; att++) {
+      try {
+        const responseStream = await ai.models.generateContentStream({
+          model,
+          contents,
+          config,
+        });
+
+        for await (const chunk of responseStream) {
+          if (chunk.text) {
+            receivedAny = true;
+            onChunk(chunk.text);
+          }
+        }
+
+        if (receivedAny) {
+          return;
+        }
+      } catch (err: any) {
+        const msg = err?.message || String(err);
+        console.warn(`[Gemini Stream] Model ${model} attempt ${att} failed:`, msg);
+        if (receivedAny) return;
+        if (att < attempts) {
+          await new Promise((res) => setTimeout(res, 500));
+        }
+      }
+    }
+  }
+
+  if (!receivedAny) {
+    onChunk(`नमस्ते! AI सर्वर से उत्तर प्राप्त करने में देरी हो रही है। कृपया कुछ ही सेकंड में अपना सवाल पुनः भेजें।\n\n*(Connection delay. Please ask your question again in a moment)*`);
   }
 }
 

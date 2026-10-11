@@ -75,28 +75,22 @@ export function MathGPTInterface({ settings, onUpdateSettings }: MathGPTInterfac
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
-  // Persistence for chats in localStorage
-  const [recentSessions, setRecentSessions] = useState<RecentChatSession[]>(() => {
+  // In-memory recent sessions for the current active tab only (NEVER persisted to disk or database)
+  const [recentSessions, setRecentSessions] = useState<RecentChatSession[]>([]);
+
+  // Purge any previously saved history so app always opens completely clean
+  useEffect(() => {
     try {
-      const saved = localStorage.getItem('mathgpt_recent_sessions');
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
+      localStorage.removeItem('mathgpt_recent_sessions');
+      localStorage.removeItem('ai_math_tutor_progress');
+    } catch (e) {
+      console.error(e);
     }
-  });
+  }, []);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatScrollContainerRef = useRef<HTMLDivElement>(null);
-
-  // Save recent sessions
-  useEffect(() => {
-    try {
-      localStorage.setItem('mathgpt_recent_sessions', JSON.stringify(recentSessions));
-    } catch (e) {
-      console.error(e);
-    }
-  }, [recentSessions]);
 
   // Scroll to bottom on new messages strictly inside the chat container (prevents window jumping)
   useEffect(() => {
@@ -207,7 +201,18 @@ export function MathGPTInterface({ settings, onUpdateSettings }: MathGPTInterfac
       content: query,
       timestamp: Date.now(),
     };
-    setMessages((prev) => [...prev, userMsg]);
+
+    // Placeholder assistant message for live real-time streaming
+    const assistantMsgId = 'asst_' + Date.now();
+    const asstMsg: UnifiedChatMessage = {
+      id: assistantMsgId,
+      sender: 'assistant',
+      type: 'text',
+      content: '',
+      timestamp: Date.now(),
+    };
+
+    setMessages((prev) => [...prev, userMsg, asstMsg]);
     setIsProcessing(true);
 
     try {
@@ -219,7 +224,7 @@ export function MathGPTInterface({ settings, onUpdateSettings }: MathGPTInterfac
           content: m.content,
         }));
 
-      const res = await fetch('/api/solve', {
+      const res = await fetch('/api/solve-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -230,20 +235,62 @@ export function MathGPTInterface({ settings, onUpdateSettings }: MathGPTInterfac
       });
 
       if (!res.ok) {
-        throw new Error('Failed to solve query with MathGPT.');
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || 'Failed to solve query with MathGPT.');
       }
 
-      const data = await res.json();
-      const asstMsg: UnifiedChatMessage = {
-        id: 'asst_' + Date.now(),
-        sender: 'assistant',
-        type: 'text',
-        content: data.content,
-        timestamp: Date.now(),
-      };
-      setMessages((prev) => [...prev, asstMsg]);
+      const reader = res.body?.getReader();
+      if (!reader) {
+        throw new Error('Streaming response not available.');
+      }
 
-      // Add to recent sessions list
+      const decoder = new TextDecoder();
+      let accumulated = '';
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() || '';
+
+        for (const part of parts) {
+          const trimmed = part.trim();
+          if (!trimmed.startsWith('data:')) continue;
+          const jsonStr = trimmed.replace(/^data:\s*/, '');
+          if (jsonStr === '[DONE]') break;
+          try {
+            const data = JSON.parse(jsonStr);
+            if (data.chunk) {
+              accumulated += data.chunk;
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantMsgId ? { ...m, content: accumulated } : m
+                )
+              );
+            } else if (data.error) {
+              throw new Error(data.error);
+            }
+          } catch (e: any) {
+            if (e.message && !e.message.includes('JSON')) {
+              throw e;
+            }
+          }
+        }
+      }
+
+      if (!accumulated) {
+        accumulated = 'No response generated.';
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMsgId ? { ...m, content: accumulated } : m
+          )
+        );
+      }
+
+      // Add to current in-memory session list (ephemeral, not persisted)
       const firstLine = query.split('\n')[0].substring(0, 32);
       setRecentSessions((prev) => [
         {
@@ -255,14 +302,18 @@ export function MathGPTInterface({ settings, onUpdateSettings }: MathGPTInterfac
       ]);
     } catch (err: any) {
       console.error(err);
-      const errMsg: UnifiedChatMessage = {
-        id: 'err_' + Date.now(),
-        sender: 'assistant',
-        type: 'error',
-        content: err.message || 'Something went wrong. Please check your math expression and retry.',
-        timestamp: Date.now(),
-      };
-      setMessages((prev) => [...prev, errMsg]);
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantMsgId
+            ? {
+                ...m,
+                type: 'error',
+                content:
+                  err.message || 'Something went wrong. Please check your math expression and retry.',
+              }
+            : m
+        )
+      );
     } finally {
       setIsProcessing(false);
     }
@@ -273,22 +324,33 @@ export function MathGPTInterface({ settings, onUpdateSettings }: MathGPTInterfac
     setIsProcessing(true);
 
     // Show photo in user message
+    const mathContent = problem.latex ? `$$${problem.latex}$$` : problem.rawInput;
     const userMsg: UnifiedChatMessage = {
       id: 'user_photo_' + Date.now(),
       sender: 'user',
       type: 'text',
-      content: `Solve this equation: ${problem.latex || problem.rawInput}`,
+      content: mathContent,
       thumbnailUrl: thumbnail,
       timestamp: Date.now(),
     };
-    setMessages((prev) => [...prev, userMsg]);
+
+    const assistantMsgId = 'asst_photo_' + Date.now();
+    const asstMsg: UnifiedChatMessage = {
+      id: assistantMsgId,
+      sender: 'assistant',
+      type: 'text',
+      content: '',
+      timestamp: Date.now(),
+    };
+
+    setMessages((prev) => [...prev, userMsg, asstMsg]);
 
     try {
-      const res = await fetch('/api/solve', {
+      const res = await fetch('/api/solve-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          query: `Solve this mathematical problem step-by-step with clear explanation and final answer: ${problem.latex || problem.rawInput}`,
+          query: problem.latex || problem.rawInput,
           history: [],
           learningLevel: settings.learningLevel,
         }),
@@ -298,17 +360,52 @@ export function MathGPTInterface({ settings, onUpdateSettings }: MathGPTInterfac
         throw new Error('Failed to solve photo problem.');
       }
 
-      const data = await res.json();
-      const asstMsg: UnifiedChatMessage = {
-        id: 'asst_photo_sol_' + Date.now(),
-        sender: 'assistant',
-        type: 'text',
-        content: data.content,
-        timestamp: Date.now(),
-      };
-      setMessages((prev) => [...prev, asstMsg]);
+      const reader = res.body?.getReader();
+      if (!reader) {
+        throw new Error('Streaming response not available.');
+      }
 
-      // Add to recent sessions
+      const decoder = new TextDecoder();
+      let accumulated = '';
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() || '';
+
+        for (const part of parts) {
+          const trimmed = part.trim();
+          if (!trimmed.startsWith('data:')) continue;
+          const jsonStr = trimmed.replace(/^data:\s*/, '');
+          if (jsonStr === '[DONE]') break;
+          try {
+            const data = JSON.parse(jsonStr);
+            if (data.chunk) {
+              accumulated += data.chunk;
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantMsgId ? { ...m, content: accumulated } : m
+                )
+              );
+            }
+          } catch {}
+        }
+      }
+
+      if (!accumulated) {
+        accumulated = 'Problem analyzed and solved.';
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMsgId ? { ...m, content: accumulated } : m
+          )
+        );
+      }
+
+      // Add to current in-memory session (ephemeral)
       setRecentSessions((prev) => [
         {
           id: 'sess_photo_' + Date.now(),
@@ -321,14 +418,17 @@ export function MathGPTInterface({ settings, onUpdateSettings }: MathGPTInterfac
       ]);
     } catch (err: any) {
       console.error(err);
-      const errMsg: UnifiedChatMessage = {
-        id: 'err_' + Date.now(),
-        sender: 'assistant',
-        type: 'error',
-        content: err.message || 'Could not solve the photo problem. Please retry.',
-        timestamp: Date.now(),
-      };
-      setMessages((prev) => [...prev, errMsg]);
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantMsgId
+            ? {
+                ...m,
+                type: 'error',
+                content: err.message || 'Could not solve the photo problem. Please retry.',
+              }
+            : m
+        )
+      );
     } finally {
       setIsProcessing(false);
     }
@@ -797,12 +897,47 @@ export function MathGPTInterface({ settings, onUpdateSettings }: MathGPTInterfac
                             </div>
                           )}
                         </div>
+                      ) : msg.type === 'error' ? (
+                        /* Error message with retry button */
+                        <div className="space-y-2.5">
+                          <div className="flex items-center gap-1.5 text-xs font-semibold text-rose-600 dark:text-rose-400">
+                            <AlertTriangle className="w-4 h-4 shrink-0" />
+                            <span>Notice / सूचना</span>
+                          </div>
+                          <p className="text-stone-700 dark:text-stone-300 text-sm leading-relaxed">
+                            {msg.content}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const lastUserMsg = [...messages].reverse().find((m) => m.sender === 'user');
+                              if (lastUserMsg) {
+                                handleSendMessage(lastUserMsg.content);
+                              }
+                            }}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-stone-200 dark:bg-stone-800 hover:bg-stone-300 dark:hover:bg-stone-700 text-stone-800 dark:text-stone-200 transition-colors cursor-pointer"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                            Retry / पुनः प्रयास करें
+                          </button>
+                        </div>
                       ) : (
                         /* Regular text / markdown message */
-                        <FormattedMathText
-                          text={msg.content}
-                          className="leading-relaxed whitespace-pre-wrap"
-                        />
+                        msg.content ? (
+                          <FormattedMathText
+                            text={msg.content}
+                            className="leading-relaxed whitespace-pre-wrap"
+                          />
+                        ) : (
+                          <div className="flex items-center gap-2 text-stone-500 dark:text-stone-400 text-xs py-1">
+                            <span className="flex gap-1 items-center">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse delay-100"></span>
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse delay-200"></span>
+                            </span>
+                            <span className="text-[11px] font-medium">Writing solution...</span>
+                          </div>
+                        )
                       )}
 
                       {msg.mathExpression && msg.type !== 'socratic_session' && (

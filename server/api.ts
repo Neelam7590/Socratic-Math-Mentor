@@ -8,11 +8,56 @@ import {
   generateSimilarProblem,
   explainFormulaOrConcept,
   solveMathDirectly,
+  solveMathStream,
 } from './geminiService.js';
+import { trySolveLocally } from './localMathEngine.js';
 
 export const apiRouter = Router();
 
-// 0. Direct Math Solver & Conversation Endpoint (ChatGPT Style)
+// 0a. Real-time Streaming Math Solver & Conversation Endpoint (Immediate Response < 2s)
+apiRouter.post('/solve-stream', async (req: Request, res: Response) => {
+  try {
+    const { query, history, learningLevel } = req.body;
+    if (!query || typeof query !== 'string') {
+      res.status(400).json({ error: 'Query is required.' });
+      return;
+    }
+
+    // Set SSE headers for streaming
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+
+    // Instant local math engine check (near 0ms latency for arithmetic/simple equations)
+    const local = trySolveLocally(query);
+    if (local) {
+      res.write(`data: ${JSON.stringify({ chunk: local })}\n\n`);
+      res.write(`data: [DONE]\n\n`);
+      res.end();
+      return;
+    }
+
+    await solveMathStream(
+      query,
+      history || [],
+      learningLevel || 'intro_college',
+      (chunk) => {
+        res.write(`data: ${JSON.stringify({ chunk })}\n\n`);
+      }
+    );
+
+    res.write(`data: [DONE]\n\n`);
+    res.end();
+  } catch (error: any) {
+    console.error('Error in solve-stream:', error);
+    res.write(`data: ${JSON.stringify({ error: error.message || 'Error generating solution.' })}\n\n`);
+    res.write(`data: [DONE]\n\n`);
+    res.end();
+  }
+});
+
+// 0b. Direct Math Solver (Unary fallback)
 apiRouter.post('/solve', async (req: Request, res: Response) => {
   try {
     const { query, history, learningLevel } = req.body;

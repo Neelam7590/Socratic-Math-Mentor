@@ -109,7 +109,7 @@ export function ChatSidebar({
               <Calculator className="w-7 h-7 mx-auto text-stone-400 dark:text-stone-600 mb-2 opacity-80" />
               <p className="font-semibold text-stone-700 dark:text-stone-300">No recent problems</p>
               <p className="text-[11px] text-stone-500 dark:text-stone-400">
-                Solved questions and formulas will be saved here automatically.
+                Current session problems appear here. History is temporary and never saved permanently.
               </p>
             </div>
           ) : (
